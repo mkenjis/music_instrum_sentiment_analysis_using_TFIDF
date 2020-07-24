@@ -1,0 +1,194 @@
+---- Preprocessing files to adjust layout --------------
+
+val music_txt = sc.textFile("music_instrm/Musical_instruments_reviews.csv")
+ 
+val music_txt1 = music_txt.map( x => x.replaceAll("\"\"",""))
+
+music_txt1.saveAsTextFile("music_instrm.csv")
+
+> cd music_instrm.csv
+
+> cat part-00000 >../music_instrm_review.csv
+
+
+--------------------------------
+
+val music = spark.read.format("csv").option("sep",",").option("quoteAll","true").option("header","true").load("music_instrm_review.csv")
+
+music.groupBy("overall").count.show
+
+music.where("overall is null").count
+
+music.where("reviewText is null").count
+
+val music_raw = spark.read.format("csv").option("sep",",").option("quoteAll","true").option("header","true").
+                load("music_instrm_review.csv")
+
+music_raw.printSchema
+
+val music_raw1 = music_raw.select("reviewText", "overall").where("reviewText is not null").rdd
+
+val rdd = music_raw1.map( x => x.toSeq).map( x => x.toArray.map( x => x.toString))
+
+-- remove nonword characters (such as punctuation).
+val nonWordSplit = rdd.flatMap(x => x(0).split("""\W+""").map(_.toLowerCase))
+nonWordSplit.sample(true, 0.3, 42).take(100).mkString(",")
+nonWordSplit.distinct.count  // 20604
+
+-- filter out numbers and tokens that are words mixed with numbers
+val regex = """[^0-9]*""".r
+val filterNumbers = nonWordSplit.filter(token => regex.pattern.matcher(token).matches)
+filterNumbers.distinct.sample(false, 0.3, 42).take(100).mkString("\n")
+filterNumbers.distinct.count  // 18913
+
+-- list highest occurrence of words to get an idea which stop words to be removed
+val tokenCounts = filterNumbers.map(t => (t, 1)).reduceByKey(_ + _)
+val orderingDesc = Ordering.by[(String, Int), Int](_._2)
+tokenCounts.top(20)(orderingDesc).mkString("\n")
+
+-- remove stop words
+val stopwords = Set(
+ "","the","a","an","of","or","in","for","by","on","but", "is", "not", "with", "as", "was", "if",
+ "they", "are", "this", "and", "it", "have", "from", "at", "my", "be", "that", "to"
+)
+val tokenCountsFilteredStopwords = tokenCounts.filter { case(k, v) => !stopwords.contains(k) }
+tokenCountsFilteredStopwords.top(20)(orderingDesc).mkString("\n")
+
+-- remove tokens with one-character length
+val tokenCountsFilteredSize = tokenCountsFilteredStopwords.filter { case (k, v) => k.size >= 2 }
+tokenCountsFilteredSize.top(20)(orderingDesc).mkString("\n")
+
+-- list terms with only one-occurrence
+val orderingAsc = Ordering.by[(String, Int), Int](-_._2)
+tokenCountsFilteredSize.top(20)(orderingAsc).mkString("\n")
+
+-- remove terms with only one-occurrence
+val rareTokens = tokenCounts.filter{ case (k, v) => v < 2 }.map{ case (k, v) => k }.collect.toSet
+val tokenCountsFilteredAll = tokenCountsFilteredSize.filter { case (k, v) => !rareTokens.contains(k) }
+tokenCountsFilteredAll.top(20)(orderingAsc).mkString("\n")
+
+tokenCountsFilteredAll.count
+res24: Long = 10679
+
+def tokenize(line: String): Seq[String] = {
+ line.split("""\W+""")
+ .map(_.toLowerCase)
+ .filter(token => regex.pattern.matcher(token).matches)
+ .filterNot(token => stopwords.contains(token))
+ .filterNot(token => rareTokens.contains(token))
+ .filter(token => token.size >= 2)
+ .toSeq
+}
+
+rdd.flatMap(x => tokenize(x(0))).distinct.count
+res27: Long = 10679
+
+
+val sets = rdd.randomSplit(Array(0.8,0.2))
+val trainSet = sets(0)
+val testSet = sets(1)
+
+val tokens = trainSet.map(x => tokenize(x(0)))
+tokens.first.take(20)
+
+val categories = rdd.map( x => x(1)).distinct.sortBy(x => x).zipWithIndex.collect.toMap
+
+---------------------------
+
+import org.apache.spark.mllib.linalg.{ SparseVector => SV }
+import org.apache.spark.mllib.feature.HashingTF
+import org.apache.spark.mllib.feature.IDF
+
+val dim = math.pow(2, 14).toInt
+val hashingTF = new HashingTF(dim)
+
+-- transform function of HashingTF maps each input document (that is, a sequence of tokens) to an MLlib Vector.
+val tf = hashingTF.transform(tokens)
+tf.cache
+
+val v = tf.first.asInstanceOf[SV]
+v.size
+v.values.size
+println(v.values.take(10).toSeq)
+println(v.indices.take(10).toSeq)
+
+-- compute the inverse document frequency for each term in the corpus
+-- by creating a new IDF instance and calling fit with our RDD of term frequency
+-- vectors as the input. We will then transform our term frequency vectors to TF-IDF
+-- vectors through the transform function of IDF:
+
+val idf = new IDF().fit(tf)
+val tfidf = idf.transform(tf)
+val v2 = tfidf.first.asInstanceOf[SV]
+println(v2.values.size)
+println(v2.values.take(10).toSeq)
+println(v2.indices.take(10).toSeq)
+
+---------------------
+
+-- TF-IDF weighting will tend to assign a lower weighting to common terms. To see
+ - this, we can compute the TF-IDF representation for a few of the terms that appear in
+-- the list of top occurrences that we previously computed, such as you, do, and we:
+
+val common = sc.parallelize(Seq(Seq("you", "do", "we")))
+val tfCommon = hashingTF.transform(common)
+val tfidfCommon = idf.transform(tfCommon)
+val commonVector = tfidfCommon.first.asInstanceOf[SV]
+println(commonVector.values.toSeq)
+
+--  let's apply the same transformation to a few less common terms that we might
+-- intuitively associate with being more linked to specific topics or concepts:
+
+val uncommon = sc.parallelize(Seq(Seq("telescope", "legislation", "investment")))
+val tfUncommon = hashingTF.transform(uncommon)
+val tfidfUncommon = idf.transform(tfUncommon)
+val uncommonVector = tfidfUncommon.first.asInstanceOf[SV]
+println(uncommonVector.values.toSeq)
+
+--------------------------------
+
+import org.apache.spark.mllib.regression.LabeledPoint
+
+val zippedTrain = trainSet.zip(tfidf)
+val train = zippedTrain.map{ case(text,vector) => LabeledPoint(categories(text(1)),vector) }
+train.cache
+
+val testTf = testSet.map(x => hashingTF.transform(tokenize(x(0))))
+val testTfIdf = idf.transform(testTf)
+
+val zippedTest = testSet.zip(testTfIdf)
+val test = zippedTest.map{ case(text,vector) => LabeledPoint(categories(text(1)),vector) }
+test.cache
+
+---- Multiclass logistic regression --------------
+
+import org.apache.spark.mllib.classification.{LogisticRegressionModel, LogisticRegressionWithLBFGS}
+val numIterations = 100
+val model = new LogisticRegressionWithLBFGS().setNumClasses(5).run(train)
+
+val validPredicts =  test.map(p => (model.predict(p.features),p.label))
+
+validPredicts.take(20)
+res41: Array[(Double, Double)] = Array((4.0,4.0), (4.0,4.0), (4.0,4.0), (4.0,4.0), (4.0,4.0), (4.0,4.0), (4.0,3.0), (4.0,4.0), (4.0,4.0), (3.0,4.0), (4.0,3.0), (3.0,4.0), (4.0,4.0), (4.0,4.0), (4.0,4.0), (4.0,3.0), (4.0,4.0), (4.0,3.0), (4.0,4.0), (4.0,4.0))
+
+import org.apache.spark.mllib.evaluation.MulticlassMetrics
+val metrics = new MulticlassMetrics(validPredicts)
+validPredicts.filter(x => x._1 == x._2).count  // 1182
+validPredicts.count                            // 2079
+val accuracy = metrics.accuracy   // 0.5685425685425686
+
+---- MLlib Maive Bayes regression --------------
+
+import org.apache.spark.mllib.classification.NaiveBayes
+val model = NaiveBayes.train(train)
+
+val validPredicts =  test.map(p => (model.predict(p.features),p.label))
+
+validPredicts.take(20)
+res44: Array[(Double, Double)] = Array((3.0,4.0), (4.0,4.0), (4.0,4.0), (4.0,4.0), (4.0,4.0), (4.0,4.0), (4.0,3.0), (3.0,4.0), (4.0,4.0), (4.0,4.0), (4.0,3.0), (4.0,4.0), (4.0,4.0), (4.0,4.0), (4.0,4.0), (4.0,3.0), (2.0,4.0), (4.0,3.0), (4.0,4.0), (4.0,4.0))
+
+import org.apache.spark.mllib.evaluation.MulticlassMetrics
+val metrics = new MulticlassMetrics(validPredicts)
+validPredicts.filter(x => x._1 == x._2).count  // 1233
+validPredicts.count                            // 2079
+val accuracy = metrics.accuracy   // 0.5930735930735931
