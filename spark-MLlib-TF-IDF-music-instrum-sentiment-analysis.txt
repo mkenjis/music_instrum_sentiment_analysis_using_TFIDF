@@ -13,22 +13,40 @@ music_txt1.saveAsTextFile("music_instrm.csv")
 
 --------------------------------
 
-val music = spark.read.format("csv").option("sep",",").option("quoteAll","true").option("header","true").load("music_instrm_review.csv")
+val music = spark.read.format("csv").option("quoteAll","true").option("header","true").load("music_instrm_review.csv")
+
+scala> music.printSchema
+root
+ |-- reviewerID: string (nullable = true)
+ |-- asin: string (nullable = true)
+ |-- reviewerName: string (nullable = true)
+ |-- helpful: string (nullable = true)
+ |-- reviewText: string (nullable = true)
+ |-- overall: string (nullable = true)
+ |-- summary: string (nullable = true)
+ |-- unixReviewTime: string (nullable = true)
+ |-- reviewTime: string (nullable = true)
 
 music.groupBy("overall").count.show
++-------+-----+
+|overall|count|
++-------+-----+
+|    1.0|  217|
+|    5.0| 6938|
+|    4.0| 2084|
+|    2.0|  250|
+|    3.0|  772|
++-------+-----+
 
 music.where("overall is null").count
+res2: Long = 0
 
 music.where("reviewText is null").count
+res3: Long = 7
 
-val music_raw = spark.read.format("csv").option("sep",",").option("quoteAll","true").option("header","true").
-                load("music_instrm_review.csv")
+val rdd1 = music.select("reviewText", "overall").where("reviewText is not null").rdd
 
-music_raw.printSchema
-
-val music_raw1 = music_raw.select("reviewText", "overall").where("reviewText is not null").rdd
-
-val rdd = music_raw1.map( x => x.toSeq).map( x => x.toArray.map( x => x.toString))
+val rdd = rdd1.map( x => x.toSeq.toArray).map( x => x.map( x => x.toString))
 
 -- remove nonword characters (such as punctuation).
 val nonWordSplit = rdd.flatMap(x => x(0).split("""\W+""").map(_.toLowerCase))
@@ -125,27 +143,6 @@ println(v2.values.take(10).toSeq)
 println(v2.indices.take(10).toSeq)
 
 ---------------------
-
--- TF-IDF weighting will tend to assign a lower weighting to common terms. To see
- - this, we can compute the TF-IDF representation for a few of the terms that appear in
--- the list of top occurrences that we previously computed, such as you, do, and we:
-
-val common = sc.parallelize(Seq(Seq("you", "do", "we")))
-val tfCommon = hashingTF.transform(common)
-val tfidfCommon = idf.transform(tfCommon)
-val commonVector = tfidfCommon.first.asInstanceOf[SV]
-println(commonVector.values.toSeq)
-
---  let's apply the same transformation to a few less common terms that we might
--- intuitively associate with being more linked to specific topics or concepts:
-
-val uncommon = sc.parallelize(Seq(Seq("telescope", "legislation", "investment")))
-val tfUncommon = hashingTF.transform(uncommon)
-val tfidfUncommon = idf.transform(tfUncommon)
-val uncommonVector = tfidfUncommon.first.asInstanceOf[SV]
-println(uncommonVector.values.toSeq)
-
---------------------------------
 
 import org.apache.spark.mllib.regression.LabeledPoint
 

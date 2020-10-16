@@ -1,5 +1,7 @@
 # music_instrum_sentiment_analysis_using_TFIDF
 music instrum sentiment analysis using TFIDF
+- Source : Kaggle Dataset
+- URL : https://www.kaggle.com/eswarchandt/amazon-music-reviews
 
 # Purpose: 
 - uae TF-IDF data processing and feature extraction for relevant words
