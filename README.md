@@ -1,4 +1,4 @@
-# music_instrum_sentiment_analysis_using_TFIDF
+# music_instrum_TFIDF_sentiment_analysis
 music instrum sentiment analysis using TFIDF
 - Source : Kaggle Dataset
 - URL : https://www.kaggle.com/eswarchandt/amazon-music-reviews
